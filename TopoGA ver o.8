@@ -1,0 +1,503 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Tue Apr 04 13:11:02 2017
+
+@author: A.Vasilevich
+"""
+"""
+Flow of the script
+*** Create a flag defines either it is a test or mask designing
+*** Select only  top 5 ALP high surfaces
+*** Load images, represent them as genes, save in json format
+*** Create an array that links ALP value and Surface design
+*** Create an array that links Surface Similarity and Surface design
+*** Define functions needed for GA flow
+*** Apply evoluation function to select surfaces with highest ALP activity
+and are most dissimilarate
+                    Test Mode
+***  Save an array of options to test
+    -different Parents selection strategies
+        $ Tournament&& (select k parents)
+        & Roulette
+        $ Based on evoluation function
+        $ Probability
+        $ NSGA2 (based on Pareto principle)
+        $ SPEA2 (extension of NSGA2)
+        $ Random
+        $ Best
+        $ Worst
+        $ DoubleTournament
+        $ TournamentDCD (based on dominance)
+        $ sortNondominated
+        $ sortLogNondominated
+        
+        
+    -different Evoluation Function startegies
+        $ Most similar surface deign
+        $ Least similar surface design
+                
+    -different Crossover Strategies
+        $ one point 
+        $ two point 
+        $ Partially Matched
+        $ Ordered
+        $ Blend
+        $ Uniform partially matched &&
+        $ Uniform   &&
+    -different Mutation strategies
+        $ FlipBit && 
+        $ Uniform && 
+        $ Polynomially bounded &&
+        $ Polygon points
+    
+*** Create a loop with differetn settings of different parameters
+*** Initiate GA parameters
+*** Make an evoluation function based on DEEP Learning model
+*** Perform 10 generations, access avearge and max ALP intensity in generations
+*** Save results
+*** Deinitiate GA parameters
+*** Find based combination
+
+            Mask cration mode
+*** Use found most optimal parameters
+*** Create a TopoChip design
+*** Evaluate how new offspring is similar to  existing
+*** All posible combinations of 81 surfaces is 3321
+*** Repaeat the preocesss till 4350 new surfaces are found
+*** Randomize Surfaces locations with possibility of identification
+*** Keep track of parents
+***
+
+
+
+"""
+
+""" Atjustments to plan
+-make randomization based on many ways
+-randomize position of polygons
+-measure similarity +
+-use alp as measure of frequency to participate in evolution
+
+-create a full chip with a single replica
+- randomize surfaces locations 
+- make outside edge of flat topos
+
+- for selection use dunn test not u test
+
+-- integrte Neural  model or not
+
+-
+
+"""
+
+##load libraries 
+import numpy as np
+import PIL, codecs, json, array, random
+import matplotlib.pyplot as plt
+import matplotlib.image as mpimg
+import pandas as pd
+from deap import creator, base, tools, algorithms
+import cv2
+import itertools
+import scipy as sp
+from scipy.misc import imread
+from scipy.signal.signaltools import correlate2d as c2d
+
+np.random.seed(28072013)
+
+##Some parameters
+suffix = '.b'
+SF=2
+#############SET FLAGS
+## simulation or mask
+
+flag='simulation'
+
+##define parameters 
+#MutRate=0.05
+##Scaling function
+
+def RescaleContour(contour,SF):
+    ScPoints=list()
+    for points in contours:
+        sc_points=points.astype(float)/2
+        ScPoints.append(sc_points)
+    return(ScPoints)
+        
+
+ 
+# Load features numbers to mutate
+FeaturesData_temp = pd.read_csv('D:\projects\Genetic Algorithms\Analysis\Alp_plusFEatureSize.csv', 
+                             delimiter='\t')
+
+##make selection of only high alp, statistically significant and Feature zize not equal to 28
+if (flag=='mask'):
+    #Calculate 5% percentile
+    FeaturesData= FeaturesData_temp.loc[(FeaturesData_temp['FeatSize']!=28)&
+                                    (FeaturesData_temp['p.value.adj']<0.05)&
+                                    (FeaturesData_temp['ALPTrMean']>=ALP5)]
+    
+if (flag=='simulation'):
+    ALP5=np.percentile(FeaturesData_temp['ALPTrMean'],5)
+    FeaturesData= FeaturesData_temp.loc[(FeaturesData_temp['FeatSize']!=28)&
+                                    (FeaturesData_temp['p.value.adj']<0.05)&
+                                    (FeaturesData_temp['ALPTrMean']<=ALP5)]
+    
+FeaturesData.rename(columns = {'feature.idx':'FeatureIdx'}, inplace = True)
+
+
+FeaturesData_blob=FeaturesData.assign(Image=0).astype(object)
+
+
+InitTopoPopulation=list()
+
+##Load all images as  genes
+for i in FeaturesData.FeatureIdx.values:
+    FeatImg = np.asarray(PIL.Image.open('for_GA_200px/Pattern_FeatureIdx_{}.bmp'.format(i)).convert("L"))
+    ##replace all numbers to 0 and 1
+    ##check if arrasy is writable
+    #FeatImg.flags
+    #change it to writable
+    FeatImg.setflags(write=1)
+    FeatImg[FeatImg>0]=1
+           #flatten matrix
+    FeatImgGene=FeatImg.copy().ravel().tolist()
+    indx=FeaturesData_blob.loc[FeaturesData_blob.FeatureIdx==i].index.tolist()
+    FeaturesData_blob.set_value(indx,'Image',[FeatImgGene])
+    ##join to list
+    InitTopoPopulation.append(FeatImgGene)
+##save data to the file
+file_path = "TopoPopulation.json"
+json.dump(InitTopoPopulation, codecs.open(file_path, 'w', encoding='utf-8'), separators=(',', ':'), sort_keys=True, indent=4) ### this saves the array in .json format
+    
+##  Perform permutations
+def main (flag):
+    if(flag=='simulation'):
+        
+        creator.create("DLAlpFitness", base.Fitness, weights=(1,1))
+        creator.create("individual_guess", list, fitness=creator.DLAlpFitness)
+        
+        def initIndividual(icls, content):
+            return icls(content)
+        
+          
+        def initPopulation(pcls, ind_init, filename):
+            with open(filename, "r") as pop_file:
+                contents = json.load(pop_file)
+            return pcls(ind_init(c) for c in contents)
+        
+        toolbox = base.Toolbox()
+        
+        toolbox.register("individual_guess", initIndividual, creator.individual_guess)
+        toolbox.register("population_guess", initPopulation, list, toolbox.individual_guess, "TopoPopulation.json")
+        
+        
+                                            
+        def evaluate(individual):
+            ##find and match a data from the gathered data
+            images_lib=FeaturesData_blob.Image.values.tolist()
+           
+            for j, surf in enumerate(images_lib):
+                if surf==individual:
+                    alp_index=j
+            alp_index=[individual] in FeaturesData_blob.Image.values.tolist()
+            ALPlevel=FeaturesData_blob.ALPTrMean.iloc[alp_index]
+            return ALPlevel
+        
+        def mutatePolygons(individual,mut_chan ):
+            FeatImgGeneM=np.array(individual)
+            #FeatImgGeneM=np.array(GenTopoPopulation[0])
+            ##convert it back
+            FeatImgGeneMR=FeatImgGeneM.reshape(200,200).astype(np.uint8)
+            ##extract contours
+            ret, thresh = cv2.threshold(FeatImgGeneMR,0,1,0)
+            imgC, contours, hierarchy = cv2.findContours(thresh,cv2.RETR_TREE,cv2.CHAIN_APPROX_SIMPLE)
+            Mutant=list()
+            mut_objects=np.empty(shape=(0,2)).astype(np.int32)
+            #mut_points=np.empty(shape=(1,2)).astype(np.int32)
+            #mut_xy=np.empty().astype(np.int32)
+            
+            for objects in contours:
+                for points in objects:
+                   for xy in points:
+                       if random.random() < mut_chan:
+                           xy[0]=np.random.randint(0,200)
+                       if random.random() < mut_chan:
+                           xy[1]=np.random.randint(0,200)
+#                       mut_points=np.array([xy])
+#                   mut_objects=np.vstack((mut_objects,mut_points))
+        def mutatePolygons2(individual,mut_chan ):
+            FeatImgGeneM=np.array(individual)
+            #FeatImgGeneM=np.array(GenTopoPopulation[0])
+            ##convert it back
+            FeatImgGeneMR=FeatImgGeneM.reshape(200,200).astype(np.uint8)
+            ##extract contours
+            ret, thresh = cv2.threshold(FeatImgGeneMR,0,1,0)
+            imgC, contours, hierarchy = cv2.findContours(thresh,cv2.RETR_TREE,cv2.CHAIN_APPROX_SIMPLE)
+            Mutant=list()
+            mut_objects=np.empty(shape=(0,2)).astype(np.int32)
+            #mut_points=np.empty(shape=(1,2)).astype(np.int32)
+            #mut_xy=np.empty().astype(np.int32)
+            
+            for objects in contours:
+                #print objects.shape
+                if random.random() < mut_chan:
+                    print objects.shape
+                    #determine possible number of mutations
+                    mut_number=np.random.randint(0,np.round((np.log(objects.shape[0])))+1)
+                    if (mut_number<1):
+                        mut_number=1
+                    for i in xrange(mut_number):
+                        print i
+                        #find starting point for mutation
+                        start_point=np.random.randint(0,(objects.shape[0]-1))
+                        #find length  of mutation (till 10%)
+                        mut_length=np.random.randint(2,(objects.shape[0]/2)+1)
+                        
+                        # find which offset value to move the polygon points
+                        if (start_point+mut_length>objects.shape[0]-1):
+                            mut_indx=range(0, mut_length-(objects.shape[0]-1-start_point),1) + range(start_point, objects.shape[0]-1,1)
+                        else:
+                            mut_indx=range(start_point, start_point+mut_length,1)
+                        mut_offset_max=200-np.max(objects[mut_indx])
+                        mut_offset=np.random.randint(0,mut_offset_max)
+                        sign_x=np.random.choice((-1,1),1)
+                        sign_y=np.random.choice((-1,1),1)
+                        objects[mut_indx]=np.sum([objects[mut_indx], [mut_offset*sign_x, mut_offset*sign_y]],axis=0)[:,[0],:]
+            return contours                        
+                        ##apply t it to selected range
+
+            
+            
+            ##mutate contours through DEAP function
+        def showMutSurface(individual,contours):
+            FeatImgGeneM=np.array(individual)
+            #FeatImgGeneM=np.array(GenTopoPopulation[0])
+            ##convert it back
+            FeatImgGeneMR=FeatImgGeneM.reshape(200,200).astype(np.uint8)
+            ##extract contours
+            #ret, thresh = cv2.threshold(FeatImgGeneMR,0,1,0)
+            #imgC, contours, hierarchy = cv2.findContours(thresh,cv2.RETR_TREE,cv2.CHAIN_APPROX_SIMPLE)
+            
+            im2 = PIL.Image.fromarray(np.uint8(FeatImgGeneMR))
+            plt.figure
+            plt.imshow(im2)
+            
+            cv2.drawContours(FeatImgGeneMR,contours,-1,255, 2)
+            cv2.imshow("Mutated pillar", FeatImgGeneMR)
+           # cv2.waitKey()
+            
+           ##some tests
+        mut_rsurf=mutatePolygons2(FeatImgGene,1.5)
+        showMutSurface(FeatImgGene, mut_rsurf)
+           
+        def ContoursToBinary (individual,contours):
+            FeatImgGeneM=np.array(individual)
+            #FeatImgGeneM=np.array(GenTopoPopulation[0])
+            ##convert it back
+            FeatImgGeneMR=FeatImgGeneM.reshape(200,200).astype(np.uint8)
+            for cnt in contours:
+                cv2.drawContours(FeatImgGeneMR,[cnt],0,255,-1)
+            cv2.imshow("Mutated pillar", FeatImgGeneMR)
+            FeatImgGeneMR[FeatImgGeneMR<255]=0
+            FeatImgGeneMR[FeatImgGeneMR==255]=1
+            im2 = PIL.Image.fromarray(np.uint8(FeatImgGeneMR))
+            plt.figure
+            plt.imshow(im2)
+            
+            return FeatImgGeneMR
+        
+        mut_rsurf=mutatePolygons2(FeatImgGene,1)
+        ContoursToBinary(FeatImgGene, mut_rsurf)
+        
+        def get(i):
+            image_data_all=np.empty((200,200,1))
+            for j in xrange (1,i+1,1): 
+                #print(j)
+                # get JPG image as Scipy array, RGB (3 layer)
+                data = imread('for_GA_200px/Pattern_FeatureIdx_{}.bmp'.format(j))
+                # convert to grey-scale using W3C luminance calc
+                #data = sp.inner(data, [299, 587, 114]) / 1000.0
+                # normalize per http://en.wikipedia.org/wiki/Cross-correlation
+                if len(data)==200:
+                    #image_data=(data - data.mean()) / data.std()
+                    data[data>0]=1
+                    image_data=data
+                    image_data_all=np.dstack((image_data_all, image_data))
+                 
+            return image_data_all
+
+        
+        ##Comparae element by elemnt
+        def compare_features(x):
+            ax=np.shape(x)[2]
+            comparison_features=np.zeros((ax,ax),dtype=np.float)* np.nan
+            ii=1
+            for j in xrange (1,ax,1):
+                #print j,
+                for i in xrange (ii,ax,1):
+                    #print i,
+                    #comparison_features[j,i]=c2d(x[:,:,j], x[:,:,i], mode='same').max()
+                    if i!=j:
+                        comparison_features[j,i]=np.corrcoef(x[:,:,j].reshape(-1), x[:,:,i].reshape(-1))[0][1]
+                    
+                    
+                    #comparison_features[j,i]=j-i
+                ii+=1
+                print j,
+                    
+            return comparison_features
+        ###test
+        
+        #a=x[:,:,1]
+        #
+        #plt.imshow(a)
+        #
+        #np.corrcoef(x[:,:,2].reshape(-1), x[:,:,1].reshape(-1))[0][1]
+        #
+        
+        ##show most simuilar objects
+        
+        def show_features(data, flag, images):
+            data=abs(data)
+            data[data==0]=np.nan
+            if flag==1:
+                findx=np.unravel_index(np.nanargmax (data),data.shape)
+            if flag==-1:
+                findx=np.unravel_index(np.nanargmin (data),data.shape)
+            
+            fig, (ax_s1, ax_s2) = plt.subplots(1, 2)
+            ax_s1.imshow(images[:,:,findx[0]])
+            ax_s1.set_title('Surface1')
+            ax_s1.set_axis_off()
+            ax_s2.imshow(images[:,:,findx[1]])
+            ax_s2.set_title('Surface 2')
+            ax_s2.set_axis_off()
+            """
+            ax_corr.imshow(data[findx])
+            ax_corr.set_title('Cross-correlation')
+            ax_corr.set_axis_off()
+            ax_orig.plot(x, y, 'ro')
+            """
+            fig.show()
+         
+        #tests
+        all_image=get(2176)
+        
+        comp_feat=compare_features(all_image)
+        
+        show_features(comp_feat, -1, all_image)
+            
+        
+        ##create a loop of differen parameters
+        
+        toolbox.register("mate", tools.cxOrdered )
+        toolbox.register("mutate", tools.mutPolynomialBounded, eta=0, low=0, up=1,  indpb=0.5)
+        toolbox.register("select", tools.selRandom)
+        toolbox.register("evaluate", evaluate)
+        
+        
+        #----------
+        TopoOffspring=list()
+        #def main():
+        pop  = toolbox.population_guess()
+        # CXPB  is the probability with which two individuals
+        #       are crossed
+        #
+        # MUTPB is the probability for mutating an individual
+        #
+        # NGEN  is the number of generations for which the
+        #       evolution runs
+        CXPB, MUTPB, NGEN = 1, 0.5, 50
+        
+        #    # Evaluate the entire population
+        #    fitnesses = map(toolbox.evaluate, pop)
+        #    for ind, fit in zip(pop, fitnesses):
+        #        ind.fitness.values = fit
+        
+        #for g in range(NGEN):
+        # Select the next generation individuals
+        offspring = toolbox.select(pop, 2176)
+        # Clone the selected individuals
+        offspring = map(toolbox.clone, offspring)
+        
+        # Apply crossover and mutation on the offspring
+        for child1, child2 in zip(offspring[::2], offspring[1::2]):
+            if random.random() < CXPB:
+                toolbox.mate(child1, child2)
+                del child1.fitness.values
+                del child2.fitness.values
+        
+        for mutant in offspring:
+            if random.random() < MUTPB:
+                toolbox.mutate(mutant)
+                del mutant.fitness.values
+        
+        #        # Evaluate the individuals with an invalid fitness
+        #        invalid_ind = [ind for ind in offspring if not ind.fitness.valid]
+        #        fitnesses = map(toolbox.evaluate, invalid_ind)
+        #        for ind, fit in zip(invalid_ind, fitnesses):
+        #            ind.fitness.values = fit
+        
+        # The population is entirely replaced by the offspring
+        #pop[:] = offspring
+        TopoOffspring=offspring
+        
+            #return  offspring
+
+#main()
+
+len(TopoOffspring)
+
+
+
+ ##only fo test, comment out when ready
+GenTopoPopulation=TopoOffspring
+#GenTopoPopulat9ion=InitTopoPopulation
+
+#GenTopoPopulation[0]
+
+## cretae loop to convert from genes to coordinates of patterns
+GenesContours=list()
+for Topogene in GenTopoPopulation:
+    FeatImgGeneM=np.array(Topogene)
+    #FeatImgGeneM=np.array(GenTopoPopulation[0])
+    ##convert it back
+    FeatImgGeneMR=FeatImgGeneM.reshape(56,56).astype(np.uint8)
+    ##extract contours
+    ret, thresh = cv2.threshold(FeatImgGeneMR,0,1,0)
+    imgC, contours, hierarchy = cv2.findContours(thresh,cv2.RETR_TREE,cv2.CHAIN_APPROX_SIMPLE)
+    #save contours 
+    #contours[0]
+    ##Show image with contour
+    
+    cv2.drawContours(thresh,contours,-1,(128,255,0),3)
+    
+    
+    ##downscale contours
+        ##make funcction
+    contours2=RescaleContour(contours,SF)
+    
+    ##save the contours 
+    GenesContours.append(contours2)
+    
+    
+    
+    #cv2.drawContours(imgC, contours, -1, (0,255,0), 3)
+#    plt.imshow(FeatImgGeneMR)
+#    plt.imshow(imgC)
+#    
+    #Show resulting image
+    #converting back to images
+    #im = PIL.Image.fromarray(np.uint8(FeatImgGeneMR))
+    #im = PIL.Image.fromarray(numpy.uint8(FeatImg))
+    #show image
+    #im.show()
+    #imgplot = plt.imshow(im)
+    #Plot some statisticks for the data
+    #plt.hist(FeatImgGeneM.ravel(), bins=3, range=(0.0, 1.0), fc='k', ec='k')
+    #plt.imshow(im)
+    #plt.show()
+### Create Cif file with generated topographies
+
+
