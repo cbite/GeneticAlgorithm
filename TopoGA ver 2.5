@@ -1,0 +1,1271 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Tue Apr 04 13:11:02 2017
+
+@author: A.Vasilevich
+"""
+
+"""
+Flow of the script
+*** 
+*** Select only  top 5% ALP high surfaces
+*** Load images, represent them as genes, save in json format
+*** Create an array that links ALP value and Surface design
+*** Create an array that links Surface Similarity and Surface design
+*** Define functions needed for GA flow
+*** Apply evoluation function to select surfaces with highest ALP activity
+and are most dissimilarate
+RAndomly choose the following parameters 
+***  Save an array of options to test
+    -different Parents selection strategies
+        $ Tournament&& (select k parents)
+        & Roulette
+        $ Based on evoluation function
+        $ Probability
+        $ NSGA2 (based on Pareto principle)
+        $ SPEA2 (extension of NSGA2)
+        $ Random
+        $ Best
+        $ Worst
+        $ DoubleTournament
+        $ TournamentDCD (based on dominance)
+        $ sortNondominated
+        $ sortLogNondominated
+        
+        
+    -different Evoluation Function startegies
+        $ Most similar surface deign
+        $ Least similar surface design
+                
+    -different Crossover Strategies
+        $ one point 
+        $ two point 
+        $ Partially Matched
+        $ Ordered
+        $ Blend
+        $ Uniform partially matched &&
+        $ Uniform   &&
+    -different Mutation strategies
+        $ FlipBit && 
+        $ Uniform && 
+        $ Polynomially bounded &&
+        $ Polygon regions
+    
+*** Create a loop with differetn settings of different parameters
+*** Initiate GA parameters
+*** Use found most optimal parameters
+*** Create a TopoChip design
+*** Evaluate how new offspring is similar to  existing
+*** All posible combinations of 81 surfaces is 3321
+*** Repaeat the preocesss till 4350 new surfaces are found
+*** Randomize Surfaces locations with possibility of identification
+*** Keep track of parents            
+***
+"""
+
+""" Atjustments to plan
+
+- randomize surfaces locations 
+- make outside edge of flat topos
+
+- for selection use dunn test not u test
+"""
+
+##load libraries 
+import numpy as np
+import PIL, codecs, json#, scipy
+from PIL import Image
+import matplotlib.pyplot as plt
+import pandas as pd
+from deap import creator, base, tools
+import cv2
+from scipy.misc import imread
+import os, errno
+import math as mth
+from skimage.draw import polygon
+from skimage.morphology import erosion, dilation, opening, closing, white_tophat
+from skimage.morphology import disk
+import itertools
+import random
+
+imlength=200
+##set seed: Bernard Birthday
+np.random.seed(28072013)
+random.seed(28072013)
+
+##Define variable parameteres
+suffix = '.b'
+
+SF=imlength/2000.0
+##Number of rows ans columns in the toochip
+TopoNum=30
+Blanks_number=10
+##umber of offspring per round
+SurfPerEpo=30
+##mutation probability for polygon mutation
+#mut_chan=0.5
+
+
+##treshhold of similarity
+corr_limit=0.7
+# CXPB  is the probability with which two individuals
+#       are crossed
+#
+# MUTPB is the probability for mutating an individual
+#
+# NGEN  is the number of generations for which the
+#       evolution runs
+CXPB, MUTPB, NGEN = 1, 0.9, 1
+#MutRate=0.05
+
+##Define all functions
+
+
+
+
+##Scaling function
+def RescaleContour(contours,SF):
+    #print "rescaling contours",
+    ScPoints=list()
+    for points in contours:
+        sc_points=points.astype(float)/SF
+        ScPoints.append(sc_points)
+    return(ScPoints)
+
+def mutatePolygons(individual,mut_chan):
+    print "polygon mutation",
+    FeatImgGeneM=np.array(individual)
+    #FeatImgGeneM=np.array(GenTopoPopulation[0])
+    ##convert it back
+    FeatImgGeneMR=FeatImgGeneM.reshape(imlength,imlength).astype(np.uint8)
+    ##extract contours
+    ret, thresh = cv2.threshold(FeatImgGeneMR,0,1,0)
+    imgC, contours, hierarchy = cv2.findContours(thresh,cv2.RETR_TREE,cv2.CHAIN_APPROX_SIMPLE)
+#    Mutant=list()
+#    mut_objects=np.empty(shape=(0,2)).astype(np.int32)
+    #mut_points=np.empty(shape=(1,2)).astype(np.int32)
+    #mut_xy=np.empty().astype(np.int32)
+    
+    for objects in contours:
+        if objects.shape[0]>4:
+            #print objects.shape
+            if np.random.random() < mut_chan:
+                #print objects.shape
+                #determine possible number of mutations
+                mut_number=np.random.randint(0,np.round((np.log(objects.shape[0])))+1)
+                if (mut_number<1):
+                    mut_number=1
+                for i in xrange(mut_number):
+                    print ".",
+                    #find starting point for mutation
+                    start_point=np.random.randint(0,(objects.shape[0]-1))
+                    #find length  of mutation (till 10%)
+                    mut_length=np.random.randint(2,(objects.shape[0]/2)+1)
+                    
+                    # find which offset value to move the polygon points
+                    if (start_point+mut_length>objects.shape[0]-1):
+                        mut_indx=range(0, mut_length-(objects.shape[0]-1-start_point),1) + range(start_point, objects.shape[0]-1,1)
+                    else:
+                        mut_indx=range(start_point, start_point+mut_length,1)
+                    mut_offset_max=imlength-np.max(objects[mut_indx])
+                    mut_offset=np.random.randint(0,mut_offset_max)
+                    sign_x=np.random.choice((-1,1),1)
+                    sign_y=np.random.choice((-1,1),1)
+                    if (len(objects.shape)==3):
+                        objects[mut_indx]=np.sum([objects[mut_indx], [[mut_offset*sign_x, mut_offset*sign_y]]],axis=0)[:,[0],:]
+                    else:
+                        objects[mut_indx]=np.sum([objects[mut_indx], [mut_offset*sign_x, mut_offset*sign_y]],axis=0)[:,[0],:]
+    return contours                        
+                ##apply t it to selected range
+#individual=InitTopoPopulation[1]  
+
+def mutateRoughness(individual,randomvalue):
+    print "Rougness mutation",
+    FeatImgGeneM=np.array(individual)
+    #FeatImgGeneM=np.array(GenTopoPopulation[0])
+    ##convert it back
+    FeatImgGeneMR=FeatImgGeneM.reshape(imlength,imlength).astype(np.uint8)
+    
+#    im2 = PIL.Image.fromarray(np.uint8(FeatImgGeneMR))
+#    plt.figure
+#    plt.imshow(im2)
+    
+    
+    #introduce roughness
+    
+    ##check distribution
+    
+#    s = np.random.randint(1, imlength/4,100000)
+#    count, bins, ignored = plt.hist(s, 15, normed=True)
+#    plt.plot(bins, np.ones_like(bins), linewidth=2, color='r')
+#    plt.show()
+#    
+    
+    
+    pixelSize = np.int(np.round((imlength/4)*randomvalue))
+
+    image = PIL.Image.fromarray(np.uint8(FeatImgGeneMR))
+    image = image.resize(np.int(np.round(imlength/pixelSize)), np.int(np.round(imlength/pixelSize)), Image.NEAREST)
+    image = image.resize((np.int(imlength), np.int(imlength)), Image.NEAREST)
+
+#    im2 = PIL.Image.fromarray(np.uint8(image))
+#    plt.figure
+#    plt.imshow(im2)
+#     ##extract contours
+    ret, thresh = cv2.threshold(np.asarray(image),0,1,0)
+    imgC, contours, hierarchy = cv2.findContours(thresh,cv2.RETR_TREE,cv2.CHAIN_APPROX_SIMPLE)
+#    Mutant=list()
+#    mut_objects=np.empty(shape=(0,2)).astype(np.int32)
+    #mut_points=np.empty(shape=(1,2)).astype(np.int32)
+    #mut_xy=np.empty().astype(np.int32)
+    
+    pol_binary=ContoursToBinary(contours)
+    indiv=pol_binary.copy().ravel().tolist()
+    
+#    cv2.drawContours(np.asarray(image),contours,-1,255, 2)
+#    cv2.imshow("Mutated pillar", np.asarray(image))
+#    
+    #showMutSurface3(indiv)
+    return indiv
+    
+                             
+                ##apply t it to selected range
+def mutateDeletion(individual,randomvalue):
+    print "point mutation",
+    FeatImgGeneM=np.array(individual)
+    #FeatImgGeneM=np.array(GenTopoPopulation[0])
+    ##convert it back
+    FeatImgGeneMR=FeatImgGeneM.reshape(imlength,imlength).astype(np.uint8)
+ ###example with clouda
+
+
+
+#    img = np.zeros((imlength, imlength), dtype=np.uint8)
+    
+    r = np.random.choice(imlength,np.round((imlength/4)*randomvalue))
+    c = np.random.choice(imlength,np.round((imlength/4)*randomvalue))
+    rr, cc = polygon(r, c)
+#    img[rr, cc] = 1
+    ##remove unprintable objects
+    
+    
+
+#    cleaned =  dilation(img, selem)
+#    plt.figure
+#    plt.imshow(cleaned)
+#   
+#    im2 = PIL.Image.fromarray(np.uint8(FeatImgGeneMR))
+#    plt.figure
+#    plt.imshow(im2)
+#    
+    ##choose fctor
+    #delNum=np.random.randint(1,10,1)
+    
+    #define max and min size of deletions
+    
+#    max_del_size=imlength
+#    
+#    a=np.int(np.random.randint(0,imlength,1))
+#    b=np.int(np.random.randint(a,a+max_del_size,1))
+#    c=np.int(np.random.randint(0,imlength,1))
+#    d=np.int(np.random.randint(c,c+max_del_size,1))
+#   
+#Randomly decide dsubtract or add
+    mut_inse_del=np.random.choice((0,1),1)        
+    FeatImgGeneMR_del=FeatImgGeneMR.copy()
+    FeatImgGeneMR_del[rr, cc]=mut_inse_del
+    ##correct for small elements
+    selem = disk(imlength/100)
+    
+    FeatImgGeneMR_del_cleaned=opening(FeatImgGeneMR_del, selem)
+    
+#    im2 = PIL.Image.fromarray(np.uint8(FeatImgGeneMR_del_cleaned))
+#    plt.figure
+#    plt.imshow(im2)
+#    
+#    im2 = PIL.Image.fromarray(np.uint8(FeatImgGeneMR_del))
+#    plt.figure
+#    plt.imshow(im2)
+#         
+    
+    #introduce roughness
+    
+    ##check distribution
+    
+     
+    
+    
+
+#    im2 = PIL.Image.fromarray(np.uint8(image))
+#    plt.figure
+#    plt.imshow(im2)
+#     ##extract contours
+    ret, thresh = cv2.threshold(FeatImgGeneMR_del_cleaned,0,1,0)
+    imgC, contours, hierarchy = cv2.findContours(thresh,cv2.RETR_TREE,cv2.CHAIN_APPROX_SIMPLE)
+#    Mutant=list()
+#    mut_objects=np.empty(shape=(0,2)).astype(np.int32)
+    #mut_points=np.empty(shape=(1,2)).astype(np.int32)
+    #mut_xy=np.empty().astype(np.int32)
+    
+    pol_binary=ContoursToBinary(contours)
+    indiv=pol_binary.copy().ravel().tolist()
+    return indiv                        
+
+    
+    
+    ##mutate contours through DEAP function
+def showMutSurface3(individual):
+    FeatImgGeneM=np.array(individual)
+    #FeatImgGeneM=np.array(GenTopoPopulation[0])
+    ##convert it back
+    FeatImgGeneMR=FeatImgGeneM.reshape(imlength,imlength).astype(np.uint8)
+    ##extract contours
+    #ret, thresh = cv2.threshold(FeatImgGeneMR,0,1,0)
+    #imgC, contours, hierarchy = cv2.findContours(thresh,cv2.RETR_TREE,cv2.CHAIN_APPROX_SIMPLE)
+    
+    im2 = PIL.Image.fromarray(np.uint8(FeatImgGeneMR))
+    plt.figure
+    plt.imshow(im2)
+    
+
+
+def showMutSurface(individual,contours):
+    FeatImgGeneM=np.array(individual)
+    #FeatImgGeneM=np.array(GenTopoPopulation[0])
+    ##convert it back
+    FeatImgGeneMR=FeatImgGeneM.reshape(imlength,imlength).astype(np.uint8)
+    ##extract contours
+    #ret, thresh = cv2.threshold(FeatImgGeneMR,0,1,0)
+    #imgC, contours, hierarchy = cv2.findContours(thresh,cv2.RETR_TREE,cv2.CHAIN_APPROX_SIMPLE)
+    
+    im2 = PIL.Image.fromarray(np.uint8(FeatImgGeneMR))
+    plt.figure
+    plt.imshow(im2)
+    
+    cv2.drawContours(FeatImgGeneMR,contours,-1,255, 2)
+    cv2.imshow("Mutated pillar", FeatImgGeneMR)
+   # cv2.waitKey()
+    
+   ##some tests
+#mut_rsurf=mutatePolygons2(FeatImgGene,1.5)
+#showMutSurface(FeatImgGene, mut_rsurf)
+   
+def ContoursToBinary2 (individual,contours):
+    FeatImgGeneM=np.array(individual)
+    #FeatImgGeneM=np.array(GenTopoPopulation[0])
+    ##convert it back
+    FeatImgGeneMR=FeatImgGeneM.reshape(imlength,imlength).astype(np.uint8)
+    for cnt in contours:
+        cv2.drawContours(FeatImgGeneMR,[cnt],0,255,-1)
+    cv2.imshow("Mutated pillar", FeatImgGeneMR)
+    FeatImgGeneMR[FeatImgGeneMR<255]=0
+    FeatImgGeneMR[FeatImgGeneMR==255]=1
+    im2 = PIL.Image.fromarray(np.uint8(FeatImgGeneMR))
+    plt.figure
+    plt.imshow(im2)
+    
+    return FeatImgGeneMR
+
+def ContoursToBinary (contours):
+    print "converting contours to binary",
+    FeatImgGeneM=np.zeros((1,imlength*imlength))
+    #FeatImgGeneM=np.array(GenTopoPopulation[0])
+    ##convert it back
+    FeatImgGeneMR=FeatImgGeneM.reshape(imlength,imlength).astype(np.uint8)
+    for cnt in contours:
+        cv2.drawContours(FeatImgGeneMR,[cnt],0,255,-1)
+    #cv2.imshow("Mutated pillar", FeatImgGeneMR)
+    FeatImgGeneMR[FeatImgGeneMR<255]=0
+    FeatImgGeneMR[FeatImgGeneMR==255]=1
+    return FeatImgGeneMR
+
+## Loop to convert from genes to coordinates of patterns
+  
+
+def Genes_To_Contours(GenTopoPopulation,SF):
+    print "converting genes to contours",
+    GenesContours=list()
+    for Topogene in GenTopoPopulation:
+        print "_",
+        FeatImgGeneM=np.array(Topogene)
+        #FeatImgGeneM=np.array(GenTopoPopulation[0])
+        ##convert it back
+        FeatImgGeneMR=FeatImgGeneM.reshape(imlength,imlength).astype(np.uint8)
+        ##resize image
+        #print "rescaling image",
+        #FeatImgGeneMR=scipy.misc.imresize(FeatImgGeneMR1, 1000, interp='lanczos', mode=None)
+        
+#        im2 = PIL.Image.fromarray(np.uint8(FeatImgGeneMR1))
+#        plt.figure
+#        plt.imshow(im2)
+        
+        
+        ##extract contours
+        ret, thresh = cv2.threshold(FeatImgGeneMR,0,1,0)
+        imgC, contours, hierarchy = cv2.findContours(thresh,cv2.RETR_TREE,cv2.CHAIN_APPROX_SIMPLE)
+        #save contours 
+        #contours[0]
+        ##Show image with contour
+        #cv2.drawContours(thresh,contours,-1,(128,255,0),3)
+        ##downscale contours
+            ##make funcction
+        contours2=RescaleContour(contours,SF)
+        ##save the contours 
+        GenesContours.append(contours2)
+    return GenesContours
+        
+
+#mut_rsurf=mutatePolygons2(FeatImgGene,1)
+#ContoursToBinary(FeatImgGene, mut_rsurf)
+
+def ImagesToMatrix(i):
+    image_data_all=np.empty((imlength,imlength,1))
+    for j in xrange (1,i+1,1): 
+        #print(j)
+        # get JPG image as Scipy array, RGB (3 layer)
+        data = imread('for_GA_{}px/Pattern_FeatureIdx_{}.bmp'.format(imlength,j))
+        # convert to grey-scale using W3C luminance calc
+        #data = sp.inner(data, [299, 587, 114]) / 1000.0
+        # normalize per http://en.wikipedia.org/wiki/Cross-correlation
+        if len(data)==imlength:
+            #image_data=(data - data.mean()) / data.std()
+            data[data>0]=1
+            image_data=data
+            image_data_all=np.dstack((image_data_all, image_data))
+         
+    return image_data_all
+
+
+##Comparae element by elemnt
+def compare_parents(x):
+    print "Comparing parents"
+    ax=np.shape(x)[0]
+    comparison_features=np.zeros((ax,ax),dtype=np.float)* np.nan
+    total_correlation_surface=np.zeros((ax,2),dtype=object)* np.nan
+    ii=0
+    for j in xrange (0,ax,1):
+        #print j,
+        for i in xrange (ii,ax,1):
+            print "*",
+            #comparison_features[j,i]=c2d(x[:,:,j], x[:,:,i], mode='same').max()
+            if i!=j:
+                comparison_features[j,i]=np.corrcoef(x[j], x[i])[0][1]
+                #comparison_features[j,i]=j-i
+        ii+=1
+        #print j,
+    #calculate summ correlation per surface
+    for k in xrange (0,ax,1):
+        total_correlation_surface[k,0]=x[k]
+        total_correlation_surface[k,1]=np.nansum(abs(comparison_features[k,:]))+np.nansum(abs(comparison_features[:,k]))
+            
+    return comparison_features,total_correlation_surface
+
+#some tests
+#comparison_features,total_correlation_surface=compare_parents(InitTopoPopulation)
+
+
+
+def add_offspring_to_selected(SelectedTopos, offspring, corr_limit, OffspringMetaData,OffspringMetaData_selected):
+    print "Adding new mutatnts to selection",
+#    if len(offspring)==2:
+#        offspring=offspring[1]
+    j=0
+    for child in offspring:
+        print "%",
+        comparison_child=np.zeros((1,len(SelectedTopos)),dtype=np.float)* np.nan
+        for i in xrange (0,len(SelectedTopos),1):
+            #print i,
+            comparison_child[0,i]=np.corrcoef(child, SelectedTopos[i])[1,0]
+        if (np.any(comparison_child>corr_limit)):
+            print "similar",
+        else:
+            SelectedTopos.append(child)
+            OffspringMetaData_selected=OffspringMetaData_selected.append(OffspringMetaData.ix[j])
+        j+=1
+    return SelectedTopos, OffspringMetaData_selected
+
+#all(comparison_features<10)
+
+##select ony offspring that meets criteria
+
+###test
+
+#a=x[:,:,1]
+#
+#plt.imshow(a)
+#
+#np.corrcoef(x[:,:,2].reshape(-1), x[:,:,1].reshape(-1))[0][1]
+#
+
+##show most simuilar objects
+
+def show_Comparable_features(data, flag, images):
+    data=abs(data)
+    #data[data==0]=np.nan
+    if flag==1:
+        findx=np.unravel_index(np.nanargmax (data),data.shape)
+    if flag==-1:
+        findx=np.unravel_index(np.nanargmin (data),data.shape)
+    
+    plt.plot(np.array(images[findx[0]]),np.array(images[findx[1]]),"o") 
+    
+    FeatImgGeneM1=np.array(images[findx[0]])
+    FeatImgGeneMR1=FeatImgGeneM1.reshape(imlength,imlength).astype(np.uint8)
+    im1 = PIL.Image.fromarray(np.uint8(FeatImgGeneMR1))
+    
+    FeatImgGeneM2=np.array(images[findx[1]])
+    FeatImgGeneMR2=FeatImgGeneM2.reshape(imlength,imlength).astype(np.uint8)
+    im2 = PIL.Image.fromarray(np.uint8(FeatImgGeneMR2))
+    
+    fig, (ax_s1, ax_s2) = plt.subplots(1, 2)
+    
+    ax_s1.imshow(im1)
+    ax_s1.set_title('Surface1')
+    ax_s1.set_axis_off()
+    ax_s2.imshow(im2)
+    ax_s2.set_title('Surface 2')
+    ax_s2.set_axis_off()
+    """
+    ax_corr.imshow(data[findx])
+    ax_corr.set_title('Cross-correlation')
+    ax_corr.set_axis_off()
+    ax_orig.plot(x, y, 'ro')
+    """
+    fig.show()
+ 
+#tests
+#
+#show_Comparable_features(comparison_features, 1, InitTopoPopulation)
+#
+
+
+##select parents for the perturbation
+def Parents_to_GA (top):
+    print "Initial selection of surfaces",
+    # Load features numbers to mutate
+    FeaturesData_temp = pd.read_csv('Alp_plusFEatureSize.csv', 
+                                 delimiter='\t')
+    ALP5=np.percentile(FeaturesData_temp['ALPTrMean'],100-top)
+    ##make selection of only high alp, statistically significant and Feature zize not equal to 28
+    #Select top 5% percentile and 
+    FeaturesData= FeaturesData_temp.loc[(FeaturesData_temp['FeatSize']!=28)&
+                                    (FeaturesData_temp['p.value.adj']<0.05)&
+                                    (FeaturesData_temp['ALPTrMean']>=ALP5)]
+    FeaturesData.rename(columns = {'feature.idx':'FeatureIdx'}, inplace = True)
+    return FeaturesData
+
+def Images_to_Genes(FeaturesData): 
+    print "converting images to genes",
+    FeaturesData_blob=FeaturesData.assign(Image=0).astype(object)
+    InitTopoPopulation=list()
+    
+    ##Load all images as  genes
+    for i in FeaturesData.FeatureIdx.values:
+        print "+",
+        FeatImg = np.asarray(PIL.Image.open('for_GA_{}px/Pattern_FeatureIdx_{}.bmp'.format(imlength,i)).convert("L"))
+        ##replace all numbers to 0 and 1
+        ##check if arrasy is writable
+        #FeatImg.flags
+        #change it to writable
+        FeatImg.setflags(write=1)
+        FeatImg[FeatImg>0]=1
+               #flatten matrix
+        FeatImgGene=FeatImg.copy().ravel().tolist()
+        indx=FeaturesData_blob.loc[FeaturesData_blob.FeatureIdx==i].index.tolist()
+        FeaturesData_blob.set_value(indx,'Image',[FeatImgGene])
+        ##join to list
+        InitTopoPopulation.append(FeatImgGene)
+    ##save data to the file
+    file_path = "TopoPopulation.json"
+    json.dump(InitTopoPopulation, codecs.open(file_path, 'w', encoding='utf-8'), separators=(',', ':'), sort_keys=True, indent=4) ### this saves the array in .json format
+    return FeaturesData_blob, InitTopoPopulation
+
+##Define GA functions
+
+##test
+#np.random.seed(1)
+#np.random.random()
+#np.random.random()
+#np.random.random()
+#np.random.random()
+
+
+creator.create("DLAlpFitness", base.Fitness, weights=(1,-1))
+creator.create("individual_guess", list, fitness=creator.DLAlpFitness)
+    
+def initIndividual(icls, content):
+    #print "Individual is initiated",
+    return icls(content)
+
+  
+def initPopulation(pcls, ind_init, filename):
+    print "Population is initiated",
+    with open(filename, "r") as pop_file:
+        contents = json.load(pop_file)
+    return pcls(ind_init(c) for c in contents)
+
+def evaluateS(individual):
+    #print "Matching ALP and Similarity data with surfaces",
+    ##find and match a data from the gathered data
+    images_lib=FeaturesData_blob.Image.values.tolist()
+    for j, surf in enumerate(images_lib):
+        if surf==individual:
+            alp_index=j
+    ALPlevel=FeaturesData_blob.ALPTrMean.iloc[alp_index]
+    images_lib2=total_correlation_surface[:,0].tolist()
+    for k, surf in enumerate(images_lib2):
+        if surf==individual:
+            total_corr_index=k
+    total_corr=total_correlation_surface[total_corr_index,1]
+    return ALPlevel,total_corr
+
+def Polygon_Mut(individual, mut_chan):
+    print "Starting Polygon mutataion",
+    contours=mutatePolygons(individual, mut_chan)
+    pol_binary=ContoursToBinary(contours)
+    ##correct for small elements
+    selem = disk(imlength/100)
+    pol_binary_cleaned=opening(pol_binary, selem)
+    
+    indiv=pol_binary_cleaned.ravel().tolist()
+    return (indiv)
+
+
+
+#OffspringMetaData=np.zeros((66*66,7))
+
+OffspringMetaData=pd.DataFrame(np.nan, index=range(0,TopoNum*TopoNum), columns=['Offspring','Parent1','Parent2', 'Selection','Crossover',
+                         'Mutation','MutationChanse'],dtype='object')
+
+OffspringMetaData.names=()
+
+ 
+#parents=images_lib
+
+def MatchParents(parents):
+    OffspringMetaData_temp=pd.DataFrame(np.nan, index=range(0,len(parents)), columns=['Offspring','Parent1','Parent2', 'Selection','Crossover',
+                         'Mutation','MutationChanse'],dtype='object')
+
+    images_lib=FeaturesData_blob.Image.values.tolist()
+    i=0
+    for individual in parents:
+        if individual==[0]*(imlength*imlength):
+                               
+            OffspringMetaData_temp.set_value(i,'Parent1',"Blank")
+            OffspringMetaData_temp.set_value(i,'Parent2',"Blank")
+
+        for j, surf in enumerate(images_lib):
+            if surf==individual:
+                feat_index=j
+                FeatureIdx=FeaturesData_blob.FeatureIdx.iloc[feat_index]
+                
+                OffspringMetaData_temp.set_value(i,'Parent1',FeatureIdx)
+                OffspringMetaData_temp.set_value(i,'Parent2',FeatureIdx)
+            
+        i+=1
+            
+            
+            #        indx=FeaturesData_blob.loc[FeaturesData_blob.FeatureIdx==i].index.tolist()
+            #        
+            #        FeaturesData_blob.set_value(indx,'Image',[FeatImgGene])
+    #return OffspringMetaData_temp[~np.isnan( OffspringMetaData_temp).any(axis=1)]
+    return OffspringMetaData_temp
+
+def MatchOffspring(child1, child2,jj):
+    OffspringMetaData_temp=pd.DataFrame(np.nan, index=range(jj,jj+2), columns=['Offspring','Parent1','Parent2', 'Selection','Crossover',
+                         'Mutation','MutationChanse'],dtype='object')
+
+    images_lib=FeaturesData_blob.Image.values.tolist()
+    i=0
+    for individual in [child1, child2]:
+       for j, surf in enumerate(images_lib):
+            if surf==individual:
+                feat_index=j
+                FeatureIdx=FeaturesData_blob.FeatureIdx.iloc[feat_index]
+                if(i==0):
+                    OffspringMetaData_temp.set_value(jj,'Parent1',FeatureIdx)
+                    OffspringMetaData_temp.set_value(jj+1,'Parent1',FeatureIdx)
+                if(i==1):
+                    OffspringMetaData_temp.set_value(jj,'Parent2',FeatureIdx)
+                    OffspringMetaData_temp.set_value(jj+1,'Parent2',FeatureIdx)
+       i+=1
+            
+            #        indx=FeaturesData_blob.loc[FeaturesData_blob.FeatureIdx==i].index.tolist()
+            #        
+            #        FeaturesData_blob.set_value(indx,'Image',[FeatImgGene])
+    #return OffspringMetaData_temp[~np.isnan( OffspringMetaData_temp).any(axis=1)]
+    return OffspringMetaData_temp
+
+
+
+def TrackOffspring (mutation_event, randomvalue, sel,mut,cx,offspring,OffspringMetaData):
+    
+    Cross_type=["Ordered","OnePoint","TwoPoint","PartialyMatched"]
+    Mut_type=np.array(["Polygon_Mut","Roughness","Deletion"])
+    Sel_type=["SPEA2","Tournament","Roulette","NSGA2","Random","Best","Worst"]
+    for i, surf in enumerate(offspring):
+        #print i,
+        #OffspringMetaData.Offspring.iloc[i]=surf
+        OffspringMetaData.set_value(i,'Offspring',list(surf))
+        OffspringMetaData.Crossover.iloc[i]=Cross_type[cx-1]
+        OffspringMetaData.Selection.iloc[i]=Sel_type[sel-1]
+        OffspringMetaData.MutationChanse.iloc[i]=randomvalue
+        if(mutation_event==True):
+            OffspringMetaData.Mutation.iloc[i]=Mut_type[mut]
+        else:
+            OffspringMetaData.Mutation.iloc[i]="None"
+        ##add random number
+            
+    #print(i)    
+    return OffspringMetaData
+    
+    #do tracking
+    #mutateDeletion, mutateRoughness
+
+   
+
+    ##registration of GA instruments
+    #population
+
+toolbox = base.Toolbox()
+toolbox.register("individual_guess", initIndividual, creator.individual_guess)
+toolbox.register("population_guess", initPopulation, list, toolbox.individual_guess, "TopoPopulation.json")
+
+#selection of tools
+
+#selection
+toolbox.register("select1", tools.selSPEA2,k=SurfPerEpo)
+toolbox.register("select2", tools.selTournament,k=SurfPerEpo,tournsize=SurfPerEpo)
+toolbox.register("select3", tools.selRoulette,k=SurfPerEpo)
+toolbox.register("select4", tools.selNSGA2,k=SurfPerEpo)
+toolbox.register("select5", tools.selRandom,k=SurfPerEpo)
+toolbox.register("select6", tools.selBest,k=SurfPerEpo)
+toolbox.register("select7", tools.selWorst,k=SurfPerEpo)
+
+
+##crossover
+toolbox.register("mate1", tools.cxOrdered )
+toolbox.register("mate2", tools.cxOnePoint)
+toolbox.register("mate3", tools.cxTwoPoint)
+toolbox.register("mate4", tools.cxPartialyMatched)
+#toolbox.register("mate5", tools.cxBlend,alpha=np.random.random())
+
+#registering mutation tools
+toolbox.register("mutate1", Polygon_Mut)
+#toolbox.register("mutate2", tools.mutPolynomialBounded, eta=0, low=0, up=1,  indpb=np.random.random())
+toolbox.register("mutate2", mutateRoughness)
+toolbox.register("mutate3", mutateDeletion)
+
+
+#evaluation
+toolbox.register("evaluate", evaluateS)
+
+#Defining GA functions:
+    
+def TopoCrossover(offspring, cx):
+    OffspringMetaData=pd.DataFrame(np.nan, index=[9999999], columns=['Offspring','Parent1','Parent2', 'Selection','Crossover',
+                         'Mutation','MutationChanse'],dtype='object')
+    offspring_final=[[] for i in range((len(offspring)*len(offspring)))*2]
+    jj=0
+    #for child1, child2 in zip(offspring[::2], offspring[1::2]):
+    #np.random.seed(28072013) [np.random.randint(SurfPerEpo-1)]
+    #idxa=np.random.permutation(range(1,len(offspring)))
+    #idxb=np.random.permutation(range(1,len(offspring)))
+    #for child1, child2 in list(itertools.product(offspring[idxa],offspring[idxb]))[0:SurfPerEpo]:
+        ##Track parents
+    #random.seed ()
+#    list_seq={1, 2, 3, 4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30}
+#    list_seq=([1], [2], [3])
+#np.random.randint(SurfPerEpo)
+   # i=0
+#    
+    for child1, child2 in list(itertools.product(offspring,offspring)):
+#        i+=2
+#        print i
+##        np.random.randint(SurfPerEpo)
+#        zip(parents[::1], parents[np.random.randint(SurfPerEpo-1)])
+        
+        OffspringMetaData_temp=MatchOffspring(child1, child2,jj)
+        OffspringMetaData=OffspringMetaData.append(OffspringMetaData_temp)
+        
+        
+        if cx==1:
+            child1, child2=toolbox.mate1(child1, child2)
+#            print "Crossover 1 is selected",
+            
+        elif cx==2:
+            child1, child2=toolbox.mate2(child1, child2)
+#            print "Crossover 2 is selected",
+            
+        elif cx==3:
+            child1, child2=toolbox.mate3(child1, child2)
+#            print "Crossover 3 is selected",
+            
+        elif cx==4:
+            child1, child2=toolbox.mate4(child1, child2)
+#            print "Crossover 4 is selected",
+            
+        
+        OffspringMetaData_final=OffspringMetaData.ix[0:] 
+        offspring_final[jj]=child1
+        offspring_final[jj+1]=child2
+        
+        jj+=2
+                    
+    return OffspringMetaData_final, offspring_final
+
+    
+def TopoMutant(offspring, mut):
+    mutant_final=[[] for i in range(len(offspring))]
+    ji=0
+    for mutant in offspring:
+        ##mutation
+        ##set severity of muattaion
+        
+        randomvalue=np.random.random()
+        if randomvalue==0:
+           randomvalue=0.1 
+        #print mutant
+        mutation_event=False
+        if np.random.random() < MUTPB:
+            mutation_event=True
+            if mut[0]==True:
+                mutant=toolbox.mutate1(mutant,randomvalue)
+                #mutant=np.array(mutant).astype(np.uint8).tolist()
+#                print "Polygon Muttion is selected",
+            elif mut[1]==True:
+                mutant=toolbox.mutate2(mutant,randomvalue)
+#                print "Rougness Muttion is selected",
+            elif mut[2]==True:
+                mutant=toolbox.mutate3(mutant,randomvalue)
+#                print "Deletion/insertion is selected",
+        mutant_final[ji]=mutant
+        
+        ji+=1       
+         #showMutSurface3(mutant)       
+#        toolbox.unregister("mutate1")
+#        toolbox.unregister("mutate2")
+#        toolbox.unregister("mutate3")
+
+        
+    return mutation_event, randomvalue, mutant_final
+
+
+def TopoSelect(pop, sl):
+    if sl==1:
+        offspring = toolbox.select1(pop)
+#        print "Selection algorithm 1 has been chosen",
+    elif sl==2:
+        offspring = toolbox.select2(pop)
+#        print "Selection algorithm 2 has been chosen",
+    elif sl==3:
+        offspring = toolbox.select3(pop)
+#        print "Selection algorithm 3 has been chosen",
+    elif sl==4:
+        offspring = toolbox.select4(pop)
+#        print "Selection algorithm 4 has been chosen",
+    elif sl==5:
+        offspring = toolbox.select5(pop)
+#        print "Selection algorithm 5 has been chosen",
+    elif sl==6:
+        offspring = toolbox.select6(pop)
+#        print "Selection algorithm 6 has been chosen",
+    elif sl==7:
+        offspring = toolbox.select7(pop)
+#        print "Selection algorithm 7 has been chosen",
+    return (offspring)
+    
+##  Perform permutations
+def Permute_Topos ():
+    print "Permutation is started",
+    
+    ##create a loop of differen parameters
+##add blanks        
+    #----------
+    SelectedTopos=[[0]*(imlength*imlength) for i in range(Blanks_number)]
+    SelectedTopos_temp=[SelectedTopos,InitTopoPopulation]
+    SelectedTopos=[j for i in SelectedTopos_temp for j in i]
+#    OffspringMetaData_selected=pd.DataFrame(np.nan, index=[0], columns=['Offspring','Parent1','Parent2', 'Selection','Crossover',
+#                         'Mutation','MutationChanse'],dtype='object')
+    OffspringMetaData_selected=MatchParents(SelectedTopos)
+    
+    
+    
+    while(len(SelectedTopos)<(TopoNum*TopoNum)):
+        print len(SelectedTopos),
+        print " mutants we have so far"
+        print "======================================================================"
+        print "Starting loop to find more mutants",
+        pop = toolbox.population_guess()
+        pop= map(toolbox.clone, pop)
+        # Evaluate the entire population
+        fitnesses = map(toolbox.evaluate, pop)
+        for ind, fit in zip(pop, fitnesses):
+            ind.fitness.values = fit
+        
+        
+        
+        # randomly chose set of parameters to apply
+        sel=np.random.choice([1,2,3,4,5,6,7])
+        mut=np.random.choice([True,False],size=3)
+        cx=np.random.choice([1,2,3,4])
+        
+        #cx=np.random.choice([5])
+        
+        parents=TopoSelect(pop, sel)
+        #offspring=parents
+        #parents=random.randrange(parents)
+        #ParentsMetaData_temp=MatchParents(parents)
+
+        # Apply crossover and mutation on the offspring
+        OffspringMetaData, offspring=TopoCrossover(parents, cx)
+        mutation_event, randomvalue,mutants=TopoMutant(offspring, mut)
+        
+        OffspringMetaData=TrackOffspring (mutation_event, randomvalue,sel,mut,cx,mutants,OffspringMetaData)
+                
+        SelectedTopos, OffspringMetaData_selected=add_offspring_to_selected(SelectedTopos, mutants, corr_limit, OffspringMetaData, OffspringMetaData_selected)
+        
+        ##delete offspring
+        
+    
+    return  SelectedTopos[0:TopoNum*TopoNum], OffspringMetaData_selected.iloc[0:TopoNum*TopoNum]
+    
+def Randomize_Surfaces(SelectedTopos, OffspringMetaData_selected, TopoNum):
+    np.random.seed(28072013)
+    random_indx=np.insert(np.random.permutation((range(1,len(SelectedTopos)))),0,0)
+    
+    SelectedTopos_perm=np.array(SelectedTopos)[random_indx]
+    OffspringMetaData_selected_perm=OffspringMetaData_selected.iloc[random_indx]
+    
+    return SelectedTopos_perm,OffspringMetaData_selected_perm#, OffspringMetaData_selected
+
+
+"""
+Generate Surfaces
+"""
+FeaturesData=Parents_to_GA (5)
+FeaturesData_blob, InitTopoPopulation=Images_to_Genes(FeaturesData)
+comparison_features,total_correlation_surface=compare_parents(InitTopoPopulation)
+
+GenTopoPopulation, OffspringMetaData_selected=Permute_Topos ()
+
+np.save('First geneartion GATopo3.npy',GenTopoPopulation)
+
+#GenTopoPopulation=np.load('First geneartion GATopo.npy')
+
+GenTopoPopulation_shuffled,OffspringMetaData_selected_shuffled=Randomize_Surfaces(GenTopoPopulation,OffspringMetaData_selected,10)
+
+GenesContours=Genes_To_Contours(GenTopoPopulation_shuffled,SF)
+
+#GenesContours=GenesContours+GenesContours[0:5]
+
+##save generated data
+
+### Create Cif file with generated topographies
+
+##Defining functions
+
+def silentremove(filename):
+    try:
+        os.remove(filename)
+    except OSError as e: # this would be "except OSError, e:" before Python 2.6
+        if e.errno != errno.ENOENT: # errno.ENOENT = no such file or directory
+            raise # re-raise exception if a different error occured
+def createNewCifFile(name): 
+    silentremove('GATopoChipWalls_{}.cif'.format(name))
+    silentremove('GATopoChipFeatures_{}.cif'.format(name))  
+    silentremove('GAGeneralParameterValues_{}.cif'.format(name)) 
+    silentremove('GAParameterValuesOfFeatures_{}.cif'.format(name)) 
+    silentremove('GAPrimitivesComposingFeatures_{}.cif'.format(name)) 
+    
+    walls = open ('GATopoChipWalls_{}.cif'.format(name), 'w+')
+    feat = open ('GATopoChipFeatures_{}.cif'.format(name), 'w+')
+    gen = open ('GAGeneralParameterValues_{}.cif'.format(name), 'w+')
+    para = open ('GAParameterValuesOfFeatures_{}.cif'.format(name), 'w+')
+    prim = open ('GAPrimitivesComposingFeatures_{}.cif'.format(name), 'w+')
+    
+    return walls, feat, gen, para, prim
+
+ # Here go the statements that have to go in the last definition statement of the CIF file;
+#int ldindex =0; # Used to keep track of the current position in the lastdef array
+def IntToStr(x): # Returns the string representation of integer x bacup:http://stackoverflow.com/questions/2267362/how-to-convert-an-integer-in-any-base-to-a-string
+    x2=int(x)
+    s=str(x2)
+    return s
+
+def floorInt(x):# Returns the largest integer smaller or equal to x
+    x2=float(x)
+    xf=mth.floor(x2)+0.01
+    return int(xf)
+
+def closeDOCS(walls,feat,gen, para, prim):
+    walls.close()
+    feat.close()
+    gen.close()
+    para.close()
+    prim.close()
+    print "Files are ready to be opened"
+    
+lastdef=[]
+
+      
+def Create_TopoChipMask(GenesContours, walls, feat, gen):
+    """ Define fixed parameters (these will be the same for all features of this type, 
+    lengths are in 0.01 microns)
+    """
+    print("Defining TopoChip Parameters")
+    NumberOfTopoChipsHorizontally=int(3) # Number of TopoChips horizontally on one mask
+    NumberOfTopoChipsVertically = int(3) # Number of TopoChips vertically on one mask
+    HorizontalDistanceBetweenTopoChips = int(250000) # Horizontal distance between two Topochips on a mask
+    VerticalDistanceBetweenTopoChips = int(250000) # Vertical distance between two Topochips on a mask
+    
+    NumberOfUnitsHorizontally = TopoNum # Number of TopoUnits in one row of the TopoChip (the script assumes this number is even)
+    gen.write("NumberOfUnitsHorizontally %d\n" % NumberOfUnitsHorizontally)
+    NumberOfUnitsVertically = TopoNum # Number of TopoUnits in one column of the TopoChip (the script assumes this number is even)
+    
+    gen.write("NumberOfUnitsVertically %d\n" % NumberOfUnitsVertically)
+    UnitSideLength = int(28000) # Distance between two opposite walls of a unit
+    gen.write("UnitSideLength %d\n" % UnitSideLength)
+    WallThickness = int(1000) # Thickness of the walls surrounding the units
+    gen.write("WallThickness %d\n" % WallThickness)
+    EmptySpaceNextToWall = int(0) # The width of the space next to the unit wall in which no elements are allowed
+    gen.write("EmptySpaceNextToWall %d\n" % EmptySpaceNextToWall)
+    #FeatureSize=5600
+    FeatureSize=2000
+    
+    
+    
+    DefinitionNumber=int(1) # Used to keep track of the current definition used to write the CIF file
+    FeatureNumber=int(1)
+    walls.write("(1 unit = 0.01 micron);\n")
+    feat.write("(1 unit = 0.01 micron);\n")
+	
+    # Define parameters useful for determining where TopoChips are placed on the mask
+    print("Defining TopoChip Positions on the mask")
+	
+    HorizontalChipSize = int(WallThickness + NumberOfUnitsHorizontally * (WallThickness + UnitSideLength))
+    VerticalChipSize = int(WallThickness + NumberOfUnitsVertically * (WallThickness + UnitSideLength))
+    TotalHorizontalLength = int(NumberOfTopoChipsHorizontally * HorizontalChipSize + (NumberOfTopoChipsHorizontally - 1) * HorizontalDistanceBetweenTopoChips)
+    TotalVerticalLength = int(NumberOfTopoChipsVertically * VerticalChipSize + (NumberOfTopoChipsVertically - 1) * VerticalDistanceBetweenTopoChips)
+    HorizontalStartPoint = int(-TotalHorizontalLength/2)
+    VerticalStartPoint = int(-TotalVerticalLength/2)
+	
+    # Define the inside of all TopoUnits (this is used to make the walls for the TopoUnit
+	
+    # Make a definition of the inside of one TopoUnit
+    print("Building walls")
+	
+    WallCoordinates=np.zeros((4,2),int) # First index is corner number, starting bottom left and counterclockwise, second is coordinate (x/y)
+	
+    WallCoordinates[0][0] = WallThickness
+    WallCoordinates[0][1] = WallThickness
+    WallCoordinates[1][0] = WallThickness + UnitSideLength
+    WallCoordinates[1][1] = WallThickness
+    WallCoordinates[2][0] = WallThickness + UnitSideLength
+    WallCoordinates[2][1] = WallThickness + UnitSideLength
+    WallCoordinates[3][0] = WallThickness
+    WallCoordinates[3][1] = WallThickness + UnitSideLength
+    walls.write("DS %d 1 1;\n" % DefinitionNumber)
+    walls.write("L L1;\n")
+    walls.write("P")
+    i=0
+    while (i<4):
+        j=0
+        while (j<2):
+            walls.write(" %d" % WallCoordinates[i][j])
+            j+=1
+            print '.',
+        i+=1
+	
+    walls.write(";\n")
+    walls.write("DF;\n")
+    DefinitionNumber+=1
+	
+    # Make a definition of a row of insides of TopoUnits
+	
+    walls.write("DS %d 1 1;\n" % DefinitionNumber)
+    WallTransX = int(WallThickness + UnitSideLength)
+    i=0
+    while (i<NumberOfUnitsHorizontally):
+        walls.write("C %d T %d 0;\n" % (DefinitionNumber - 1, i * WallTransX))
+        i+=1
+    walls.write("DF;\n")
+    DefinitionNumber+=1
+	
+    # Make a definition of TopoChip of insides of TopoUnits
+	
+    walls.write("DS %d 1 1;\n" % DefinitionNumber)
+    WallTransY = int(WallThickness + UnitSideLength)
+    i=0
+    while (i<NumberOfUnitsVertically):
+        walls.write( "C %d T 0 %d;\n" % (DefinitionNumber - 1, i * WallTransY))
+        i+=1
+    walls.write("DF;\n")
+    DefinitionNumber+=1
+	
+    # Make a definition of insides of TopoUnits of multiple TopoChips
+    print("Multiply TopoChip on the mask")
+	
+    walls.write("DS %d 1 1;\n" % DefinitionNumber)
+    m=0
+    while (m<NumberOfTopoChipsHorizontally):
+        n=0 
+        while (n<NumberOfTopoChipsVertically):
+            walls.write( "C %d T %d %d;\n" % (DefinitionNumber - 1, HorizontalStartPoint + m * (HorizontalChipSize + HorizontalDistanceBetweenTopoChips), VerticalStartPoint + n * (VerticalChipSize + VerticalDistanceBetweenTopoChips)))
+            n+=1
+            print '.',
+        m+=1
+    walls.write("DF;\n")
+	
+    walls.write("C %d;\n" % DefinitionNumber)
+    walls.write("E\n")
+	
+	
+    DefinitionNumber+=1
+	  
+
+    """ Creating the features
+    TopoUnits are filled with a repeating feature and each TopoUnit is copied once to the quadrant diagonally opposite on the TopoChip
+    """
+    mm=0
+    print("Create Fetures unit by unit")
+    row = 0
+    while (row < NumberOfUnitsVertically):
+        print ("Row Number %d" % row)
+        col = 0
+        while (col < NumberOfUnitsHorizontally):
+            print ("Col Number %d" % col)
+            # Features are generated for the left half of the TopoChip and each TopoUnit is copied one time to the right half
+            
+#            if((row == 0 and col == 0) or (row == NumberOfUnitsVertically/4 and col == NumberOfUnitsHorizontally/4)): # There are four empty squares on the TopoChip
+#                col+=1
+#                print "blank"
+#                continue
+            
+            para.write("FeatureNumber %d\n" % FeatureNumber)
+            prim.write("FeatureNumber %d\n" % FeatureNumber)
+            FeatureNumber+=1
+            para.write("row %d\n" % row)
+            para.write("col %d\n" % col)
+            prim.write("row %d\n" % row)
+            prim.write("col %d\n" % col)
+	
+            # Test Output
+            print("Creating TopoUnit (%d,%d)\n" % (row, col))
+            
+            ##write Coordinates of all the features
+            feat.write("DS %d 1 1;\n" % DefinitionNumber)
+            feat.write("L L2;\n")
+            #feat.write("P")
+            #GenesContours
+            for TopoFeature in GenesContours[mm]:
+                for TopoElement in TopoFeature:
+                    feat.write("P")
+                    for CoordElement in TopoElement:
+                        #print (CoordElement)
+                        BaseXPosition = int(WallThickness + EmptySpaceNextToWall + col * (UnitSideLength + WallThickness)) # The X position of the bottom left corner of the TopoUnit where placement of features is allowed for the base TopoUnit
+                        BaseYPosition = int(WallThickness + EmptySpaceNextToWall + row * (UnitSideLength + WallThickness)) # The Y position of the bottom left corner of the TopoUnit where placement of features is allowed for the base TopoUnit
+                        XPos= float(BaseXPosition + np.asscalar(CoordElement[0]))
+                        YPos = float(BaseYPosition + np.asscalar(CoordElement[1]))
+                        feat.write(" %d %d" % (XPos,YPos))
+                feat.write(";\n")
+            	
+            FeatureRepetition = (UnitSideLength - 2 * EmptySpaceNextToWall)/FeatureSize # Compute the amount of times that a feature is repeated in one row (or column) of a TopoUnit
+            
+            feat.write("DF;\n")
+            
+            para.write("SymbolNumber %d\n" % DefinitionNumber)
+            prim.write("SymbolNumber %d\n" % DefinitionNumber)
+#	
+#            print("Compute the translation from the base TopoUnit to the copied TopoUnit")
+#            """ Compute the translation from the base TopoUnit to the copied TopoUnit""" 
+	
+#            UnitTransX = (NumberOfUnitsHorizontally/2) * (UnitSideLength + WallThickness)
+#            UnitTransY = (NumberOfUnitsVertically/2) * (UnitSideLength + WallThickness)
+#            if(row >= NumberOfUnitsVertically/2): UnitTransY -= NumberOfUnitsVertically * (UnitSideLength + WallThickness) # Make a correction if the row was in the top half of the TopoChip
+	
+            # Make a definition with a row of features
+            DefinitionNumber+=1
+            feat.write("DS %d 1 1;\n" % DefinitionNumber)
+            m=0
+            while(m<FeatureRepetition):
+                print '.',
+                TransX = m * FeatureSize
+                feat.write("C %d T %d 0;\n" % (DefinitionNumber-1, TransX))
+                m+=1
+
+            feat.write("DF;\n")
+	
+            # Make a definition with a unit of features
+            DefinitionNumber+=1
+            feat.write("DS %d 1 1;\n" % DefinitionNumber)
+            m=0
+            while(m<FeatureRepetition):
+
+                TransY = m * FeatureSize
+                feat.write("C %d T 0 %d;\n" % (DefinitionNumber-1, TransY))
+                m+=1
+            feat.write("DF;\n")
+	
+            # Call the previously created definition and write it to lastcall
+	
+            #fprintf(feat, "C %d T 0 0;\n", DefinitionNumber);
+            #fprintf(feat, "C %d T %d %d;\n", DefinitionNumber, UnitTransX, UnitTransY);
+	
+            temps="".join(["C ",IntToStr(DefinitionNumber),";\n"]) # the first call statement
+            lastdef.append(temps)
+	
+            
+#            temps ="".join([ "C ", IntToStr(DefinitionNumber), " T ", IntToStr(UnitTransX), " ", IntToStr(UnitTransY),";\n"])   # the translated call statement
+#            lastdef.append(temps)
+#            #lastdef[ldindex++] = "C ".append(IntToStr(DefinitionNumber).c_str()).append(" T 0 0;\n");
+            #lastdef[ldindex++] = "C " + IntToStr(DefinitionNumber).c_str() + " T 0 0;\n";
+            #lastdef[ldindex++] = "C " + IntToStr(DefinitionNumber).c_str() + " T " + IntToStr(UnitTransX).c_str() + " " + IntToStr(UnitTransY).c_str() + ";\n";
+	
+            DefinitionNumber+=1
+            mm+=1
+		
+            col+=1	
+        row+=1
+	
+    feat.write("DS %d 1 1;\n" % DefinitionNumber)
+    m=0
+    while(m<len(lastdef)):
+        feat.write( "%s"  % str(lastdef[m]))
+        #print lastdef[m]
+        m+=1
+
+
+    feat.write("DF;\n")
+    #fprintf(feat, "C %d;\n", DefinitionNumber);	
+    DefinitionNumber+=1
+	
+    # Make a new definition calling the TopoChip definition multiple times
+	
+    feat.write("DS %d 1 1;\n" % DefinitionNumber)
+    print("Finishing")
+    m=0
+    while(m<NumberOfTopoChipsHorizontally):
+        n=0
+        while(n<NumberOfTopoChipsVertically):
+            feat.write("C %d T %d %d;\n" % (DefinitionNumber - 1, HorizontalStartPoint + m * (HorizontalChipSize + HorizontalDistanceBetweenTopoChips), VerticalStartPoint + n * (VerticalChipSize + VerticalDistanceBetweenTopoChips)))
+            n+=1
+            print '.',
+        m+=1
+    feat.write("DF;\n")
+	
+    feat.write("C %d;\n" % DefinitionNumber)
+	
+	
+    feat.write("E\n")
+    print("TopoChip is Ready!")    
+	
+    #printf("TotalNumberOfCircles = %d\n", TotalNumberOfCircles);
+    #printf("TotalNumberOfTriangles = %d\n", TotalNumberOfTriangles);
+    #printf("TotalNumberOfLines = %d\n", TotalNumberOfLines);
+
+walls, feat, gen, para, prim=createNewCifFile('First test full GA8_2')
+
+Create_TopoChipMask(GenesContours, walls, feat, gen)
+
+closeDOCS(walls,feat,gen, para, prim)
